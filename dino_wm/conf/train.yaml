@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - env: point_maze
+  - env: push_cube
   - encoder: dino 
   - action_encoder: proprio
   - proprio_encoder: proprio
@@ -31,7 +31,7 @@ hydra:
 
 training:
   seed: 0
-  epochs: 100
+  epochs: 10
   batch_size: 16 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
