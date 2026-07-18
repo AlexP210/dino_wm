@@ -122,12 +122,15 @@ class VWorldModel(nn.Module):
         input : obs (dict): "visual", "proprio" (b, t, 3, img_size, img_size)
         output:   z (dict): "visual", "proprio" (b, t, num_patches, encoder_emb_dim)
         """
-        visual = obs['visual']
-        b = visual.shape[0]
-        visual = rearrange(visual, "b t ... -> (b t) ...")
-        visual = self.encoder_transform(visual)
-        visual_embs = self.encoder.forward(visual)
-        visual_embs = rearrange(visual_embs, "(b t) p d -> b t p d", b=b)
+        if "dino_patch_features" in obs:
+            visual_embs = obs["dino_patch_features"]
+        else:
+            visual = obs['visual']
+            b = visual.shape[0]
+            visual = rearrange(visual, "b t ... -> (b t) ...")
+            visual = self.encoder_transform(visual)
+            visual_embs = self.encoder.forward(visual)
+            visual_embs = rearrange(visual_embs, "(b t) p d -> b t p d", b=b)
 
         proprio = obs['proprio']
         proprio_emb = self.encode_proprio(proprio)

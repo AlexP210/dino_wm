@@ -19,6 +19,7 @@ STATE_KEYS = [
     "env_states/actors/table-workspace",
 ]
 RGB_KEY = "obs/sensor_data/base_camera/rgb"
+DINO_KEY = "obs/sensor_data/base_camera/dino_patch_features"
 
 
 class PushBlockDataset(TrajDataset):
@@ -116,7 +117,9 @@ class PushBlockDataset(TrajDataset):
         frames = list(frames)
         with h5py.File(self.data_path, "r") as f:
             image = f[self.traj_keys[idx]][RGB_KEY][frames]  # THWC uint8
+            dino = f[self.traj_keys[idx]][DINO_KEY][frames]  # T P D precomputed features
         image = torch.from_numpy(image)
+        dino = torch.from_numpy(dino).float()
         proprio = self.proprios[idx, frames]
         act = self.actions[idx, frames]
         state = self.states[idx, frames]
@@ -127,7 +130,8 @@ class PushBlockDataset(TrajDataset):
             image = self.transform(image)
         obs = {
             "visual": image,
-            "proprio": proprio
+            "proprio": proprio,
+            "dino_patch_features": dino,
         }
         return obs, act, state, {} # env_info
 

@@ -34,6 +34,7 @@ training:
   epochs: 10
   batch_size: 16 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
+  save_best: True
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
   encoder_lr: 1e-6
@@ -79,3 +80,6 @@ plan_settings:
   goal_source: ['dset', 'random_state']
   goal_H: [5]
   alpha: [0.1, 1]
+
+# Config variables to run inside TSD environment
+data_dir: ???
