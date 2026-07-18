@@ -91,11 +91,14 @@ class TrajSlicerDataset(TrajDataset):
 
     def __getitem__(self, idx):
         i, start, end = self.slices[idx]
-        obs, act, state, _ = self.dataset[i]
+        # Load only this window's frames, not the whole episode. For memory-mapped
+        # datasets this is what keeps I/O bounded to the pages actually used — pulling
+        # the full trajectory here (and slicing after) re-reads every episode once per
+        # window and defeats the mmap entirely.
+        obs, act, state, _ = self.dataset.get_frames(i, range(start, end))
         for k, v in obs.items():
-            obs[k] = v[start:end:self.frameskip]
-        state = state[start:end:self.frameskip]
-        act = act[start:end]
+            obs[k] = v[::self.frameskip]
+        state = state[::self.frameskip]
         act = rearrange(act, "(n f) d -> n (f d)", n=self.num_frames)  # concat actions
         return tuple([obs, act, state])
 

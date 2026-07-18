@@ -323,6 +323,7 @@ class Trainer:
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
         )
+        self.model = torch.compile(self.model)
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(

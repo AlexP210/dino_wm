@@ -31,8 +31,8 @@ hydra:
 
 training:
   seed: 0
-  epochs: 10
-  batch_size: 16 # should >= nodes * tasks_per_node
+  epochs: 100
+  batch_size: 32 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   save_best: True
   reconstruct_every_x_batch: 500
@@ -68,7 +68,7 @@ model:
   num_pred: ${num_pred}
   train_encoder: False
   train_predictor: True
-  train_decoder: True
+  train_decoder: False
 
 debug: False 
 
