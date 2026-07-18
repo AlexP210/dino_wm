@@ -1,6 +1,7 @@
 import h5py
 import torch
 import numpy as np
+from tqdm import tqdm
 from pathlib import Path
 from einops import rearrange
 from typing import Callable, Optional
@@ -22,10 +23,26 @@ RGB_KEY = "obs/sensor_data/base_camera/rgb"
 DINO_KEY = "obs/sensor_data/base_camera/dino_patch_features"
 
 
+def _view_dataset(raw: np.memmap, dataset: h5py.Dataset) -> np.ndarray:
+    """
+    Zero-copy view of a contiguous (uncompressed, unchunked) h5py.Dataset, backed by `raw`
+    — a single np.memmap covering the whole source file. This reads no data itself: disk
+    I/O only happens lazily, a page at a time, once the returned array is actually indexed.
+    """
+    offset = dataset.id.get_offset()
+    if offset is None:
+        raise ValueError(
+            f"{dataset.name!r} in {dataset.file.filename!r} is chunked and/or compressed and "
+            "has no fixed file offset, so it cannot be memory-mapped. Regenerate the file with "
+            "tools/preprocess_data_mmap.py, which stores every dataset contiguously."
+        )
+    return np.ndarray(shape=dataset.shape, dtype=dataset.dtype, buffer=raw, offset=offset)
+
+
 class PushBlockDataset(TrajDataset):
     def __init__(
         self,
-        data_path: str = "/data/AlexPleava/datasets/maniskill/PushCube-v1/trajectory.rgb.pd_ee_delta_pos.physx_cuda.h5",
+        data_path,
         n_rollout: Optional[int] = None,
         transform: Optional[Callable] = None,
         normalize_action: bool = False,
@@ -35,13 +52,21 @@ class PushBlockDataset(TrajDataset):
         self.transform = transform
         self.normalize_action = normalize_action
 
+        # A single memmap covering the whole file; the per-trajectory RGB/DINO views
+        # built below are cheap pointer arithmetic into it (see _view_dataset) and read
+        # no data until get_frames() actually indexes them. The low-dim actions/proprio/
+        # state fields stay eagerly loaded — they're small and needed up front for the
+        # normalization stats and padding.
+        self._raw_mmap = np.memmap(self.data_path, mode="r", dtype=np.uint8)
+
         with h5py.File(self.data_path, "r") as f:
             traj_keys = sorted(f.keys(), key=lambda k: int(k.split("_")[1]))
             if n_rollout:
                 traj_keys = traj_keys[:n_rollout]
 
             actions, states, proprios, seq_lengths = [], [], [], []
-            for key in traj_keys:
+            rgb_views, dino_views = [], []
+            for key in tqdm(traj_keys, desc="Mapping Data"):
                 traj = f[key]
                 actions.append(torch.from_numpy(traj["actions"][:]).float())
                 proprios.append(torch.cat(
@@ -51,8 +76,12 @@ class PushBlockDataset(TrajDataset):
                     [torch.from_numpy(traj[k][:]).float() for k in STATE_KEYS], dim=-1
                 ))
                 seq_lengths.append(actions[-1].shape[0])
+                rgb_views.append(_view_dataset(self._raw_mmap, traj[RGB_KEY]))
+                dino_views.append(_view_dataset(self._raw_mmap, traj[DINO_KEY]))
 
         self.traj_keys = traj_keys
+        self.rgb_views = rgb_views
+        self.dino_views = dino_views
         self.seq_lengths = torch.tensor(seq_lengths)
 
         self.actions = self._pad_stack(actions)
@@ -115,11 +144,11 @@ class PushBlockDataset(TrajDataset):
 
     def get_frames(self, idx, frames):
         frames = list(frames)
-        with h5py.File(self.data_path, "r") as f:
-            image = f[self.traj_keys[idx]][RGB_KEY][frames]  # THWC uint8
-            dino = f[self.traj_keys[idx]][DINO_KEY][frames]  # T P D precomputed features
-        image = torch.from_numpy(image)
-        dino = torch.from_numpy(dino).float()
+        # Fancy-indexing an np.memmap view allocates a fresh, contiguous, writable array
+        # and is the point where only the touched pages are read from disk (OS page cache
+        # serves repeat touches, e.g. across epochs, at close to RAM speed).
+        image = torch.from_numpy(self.rgb_views[idx][frames])   # THWC uint8
+        dino = torch.from_numpy(self.dino_views[idx][frames].astype(np.float32))  # T P D precomputed features
         proprio = self.proprios[idx, frames]
         act = self.actions[idx, frames]
         state = self.states[idx, frames]
