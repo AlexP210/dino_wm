@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - env: push_cube
+  - env: wall
   - encoder: dino 
   - action_encoder: proprio
   - proprio_encoder: proprio
