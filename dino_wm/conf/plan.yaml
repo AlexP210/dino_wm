@@ -40,3 +40,6 @@ objective:
   alpha: 1
   base: 2 # coeff base for weighting all frames. Only applies when mode == 'all'
   mode: last
+
+# Config variables to run inside TSD environment
+data_dir: ???

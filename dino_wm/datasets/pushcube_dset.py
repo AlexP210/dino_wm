@@ -178,8 +178,8 @@ class PushBlockDataset(TrajDataset):
 
 def load_pushcube_slice_train_val(
     transform,
+    data_path,
     n_rollout=None,
-    data_path="/data/AlexPleava/datasets/maniskill/PushCube-v1/trajectory.rgb.pd_ee_delta_pos.physx_cuda.h5",
     normalize_action=False,
     split_ratio=0.8,
     num_hist=0,

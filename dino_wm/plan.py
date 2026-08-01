@@ -9,7 +9,6 @@ import wandb
 import logging
 import warnings
 import numpy as np
-import submitit
 from itertools import product
 from pathlib import Path
 from einops import rearrange
@@ -352,7 +351,7 @@ class PlanWorkspace:
 
 def load_ckpt(snapshot_path, device):
     with snapshot_path.open("rb") as f:
-        payload = torch.load(f, map_location=device)
+        payload = torch.load(f, map_location=device, weights_only=False)
     loaded_keys = []
     result = {}
     for k, v in payload.items():
@@ -458,8 +457,10 @@ def planning_main(cfg_dict):
     )
     model = load_model(model_ckpt, model_cfg, num_action_repeat, device=device)
 
-    # use dummy vector env for wall and deformable envs
-    if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
+    # use dummy vector env for wall and deformable envs, and for push_cube: SubprocVectorEnv
+    # forks, and by this point the parent has already initialized CUDA (the world model is
+    # on the GPU), which a forked SAPIEN/torch CUDA context cannot survive.
+    if model_cfg.env.name in ("wall", "deformable_env", "push_cube"):
         from env.serial_vector_env import SerialVectorEnv
         env = SerialVectorEnv(
             [
