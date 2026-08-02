@@ -27,8 +27,8 @@ model_name: 2026-07-29/02-55-09/
 model_epoch: latest
 
 seed: 99
-n_evals: 1
-goal_source: 'dset'
+n_evals: 25
+goal_source: 'random_state'
 goal_H: 5 
 n_plot_samples: 10
 
@@ -42,7 +42,7 @@ objective:
 
 planner:
   _target_: planning.mpc.MPCPlanner
-  max_iter: null 
+  max_iter: 2 
   n_taken_actions: 5
   sub_planner:
     target: planning.cem.CEMPlanner

@@ -457,6 +457,14 @@ def planning_main(cfg_dict):
     )
     model = load_model(model_ckpt, model_cfg, num_action_repeat, device=device)
 
+    env_kwargs = dict(model_cfg.env.kwargs)
+    if model_cfg.env.name == "push_cube":
+        # push_cube draws goal_source='random_state' goals from the recorded trajectories
+        # rather than synthesizing them. Checkpoints trained before goal_data_path existed
+        # have no such entry in their frozen hydra.yaml, and it is always the file the
+        # model trained on, so default it rather than making old checkpoints unplannable.
+        env_kwargs.setdefault("goal_data_path", model_cfg.env.dataset.data_path)
+
     # use dummy vector env for wall and deformable envs, and for push_cube: SubprocVectorEnv
     # forks, and by this point the parent has already initialized CUDA (the world model is
     # on the GPU), which a forked SAPIEN/torch CUDA context cannot survive.
@@ -464,18 +472,14 @@ def planning_main(cfg_dict):
         from env.serial_vector_env import SerialVectorEnv
         env = SerialVectorEnv(
             [
-                gym.make(
-                    model_cfg.env.name, *model_cfg.env.args, **model_cfg.env.kwargs
-                )
+                gym.make(model_cfg.env.name, *model_cfg.env.args, **env_kwargs)
                 for _ in range(cfg_dict["n_evals"])
             ]
         )
     else:
         env = SubprocVectorEnv(
             [
-                lambda: gym.make(
-                    model_cfg.env.name, *model_cfg.env.args, **model_cfg.env.kwargs
-                )
+                lambda: gym.make(model_cfg.env.name, *model_cfg.env.args, **env_kwargs)
                 for _ in range(cfg_dict["n_evals"])
             ]
         )

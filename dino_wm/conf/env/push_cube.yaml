@@ -1,6 +1,9 @@
 name: push_cube
 args: []
-kwargs: {}
+kwargs:
+  # Where sample_random_init_goal_states (goal_source: 'random_state') draws demonstrated
+  # init/goal pairs from — the same recording the world model trains on.
+  goal_data_path: ${env.dataset.data_path}
 
 dataset:
   _target_: "datasets.pushcube_dset.load_pushcube_slice_train_val"

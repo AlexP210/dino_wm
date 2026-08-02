@@ -1,3 +1,4 @@
+import h5py
 import numpy as np
 import gym
 import gymnasium
@@ -46,6 +47,99 @@ def _to_numpy(x):
     return np.asarray(x)
 
 
+def _cube_success(cube_xy, cube_z, target_xy):
+    """
+    PushCube-v1's success test: cube inside the goal region in xy, still resting on the
+    table. Shared by eval_state and the demo-goal index below so the criterion the goals
+    are selected by and the criterion they are scored by cannot drift apart.
+
+    Broadcasts over a leading time axis, so it takes either single frames or whole tracks.
+    Returns (success, cube_dist).
+    """
+    cube_dist = np.linalg.norm(np.asarray(cube_xy) - np.asarray(target_xy), axis=-1)
+    success = (cube_dist < GOAL_RADIUS) & (np.asarray(cube_z) < CUBE_HALF_SIZE + 5e-3)
+    return success, cube_dist
+
+
+def _split_episode_indices(n, split, split_ratio, split_seed):
+    """
+    Reproduce the train/valid partition that datasets/traj_dset.py::split_traj_datasets
+    applies to this same file, so goals can be drawn from episodes the world model was
+    not trained on. Pinned to that implementation: a torch.randperm over the
+    integer-sorted trajectory order, first int(split_ratio * n) to train.
+
+    split=None returns every episode.
+    """
+    if split is None:
+        return list(range(n))
+    if split not in ("train", "valid"):
+        raise ValueError(f"split must be 'train', 'valid' or None, got {split!r}")
+    perm = torch.randperm(
+        n, generator=torch.Generator().manual_seed(split_seed)
+    ).tolist()
+    cut = int(split_ratio * n)
+    return perm[:cut] if split == "train" else perm[cut:]
+
+
+# Cache of the per-episode goal index, keyed by everything that determines its contents.
+# Planning builds n_evals separate wrapper instances inside one process (see
+# SerialVectorEnv in plan.py), and without this every one of them would re-scan the same
+# ~20k-episode file.
+_DEMO_GOAL_INDEX_CACHE = {}
+
+
+def _build_demo_goal_index(
+    data_path, state_dim, cube_start, goal_start, split, split_ratio, split_seed
+):
+    """
+    Scan the recorded trajectories once and keep, for each episode that satisfies
+    PushCube's success condition at some frame after the first, that episode's initial
+    state and the stack of its success-frame states.
+
+    Only those two things are retained (not the full state tracks), so the index stays a
+    few MB regardless of how much of the file qualifies.
+
+    Every recorded state frame is a candidate goal, including the trailing terminal one
+    that datasets/pushcube_dset.py drops — that frame is dropped there because it has no
+    successor *action*, which a goal does not need.
+    """
+    with h5py.File(data_path, "r") as f:
+        traj_keys = sorted(f.keys(), key=lambda k: int(k.split("_")[1]))
+        episodes = []
+        for i in _split_episode_indices(
+            len(traj_keys), split, split_ratio, split_seed
+        ):
+            traj = f[traj_keys[i]]
+            state = np.concatenate(
+                [traj[k][:] for k in STATE_KEYS], axis=-1
+            ).astype(np.float32)
+            if state.shape[-1] != state_dim:
+                raise ValueError(
+                    f"{data_path}: episode {traj_keys[i]} has state width "
+                    f"{state.shape[-1]}, but this env's flat state is {state_dim} wide. "
+                    "The recording and the live env disagree on STATE_KEYS."
+                )
+            ok, _ = _cube_success(
+                state[:, cube_start : cube_start + 2],
+                state[:, cube_start + 2],
+                state[:, goal_start : goal_start + 2],
+            )
+            # A goal equal to the start would be trivially satisfied. In practice the cube
+            # never spawns inside the goal region, so this only guards against a future
+            # change to the reset distribution.
+            ok[0] = False
+            if not ok.any():
+                continue
+            episodes.append((state[0].copy(), state[ok].copy()))
+
+    if not episodes:
+        raise ValueError(
+            f"{data_path}: no episode in the {split or 'full'} split ever reaches "
+            "PushCube's success condition, so there are no demonstrated goals to sample."
+        )
+    return episodes
+
+
 class PushCubeWrapper(gym.Env):
     """
     Adapts ManiSkill's PushCube-v1 to the planning interface DINO-WM expects
@@ -82,6 +176,13 @@ class PushCubeWrapper(gym.Env):
             on reset. The dataset used 1, but PushCube randomizes nothing at reconfigure
             time (only object *poses*, at episode init), so 0 is equivalent here and much
             faster per reset.
+        goal_data_path: recorded-trajectory .h5 that `sample_random_init_goal_states`
+            draws its init/goal pairs from — i.e. the same file the world model trained
+            on. Only read under `goal_source: 'random_state'`, and only on first use, so
+            leaving it None costs nothing for `goal_source: 'dset'` planning.
+        goal_split / goal_split_ratio / goal_split_seed: which partition of that file
+            goals may come from. Defaults match datasets/pushcube_dset.py's own split, so
+            goals land on held-out episodes. Pass goal_split=None to use every episode.
     """
 
     metadata = {"render.modes": ["rgb_array"]}
@@ -94,6 +195,10 @@ class PushCubeWrapper(gym.Env):
         obs_mode: str = "rgb",
         reward_mode: str = "normalized_dense",
         render_size: int = CAMERA_RESOLUTION,
+        goal_data_path: str = None,
+        goal_split: str = "valid",
+        goal_split_ratio: float = 0.8,
+        goal_split_seed: int = 42,
     ):
         camera_pose = sapien_utils.look_at(eye=CAMERA_EYE, target=CAMERA_TARGET)
         self._env = gymnasium.make(
@@ -115,6 +220,11 @@ class PushCubeWrapper(gym.Env):
         self._base = self._env.unwrapped
         self.render_size = render_size
         self._seed = None
+
+        self._goal_data_path = goal_data_path
+        self._goal_split = goal_split
+        self._goal_split_ratio = goal_split_ratio
+        self._goal_split_seed = goal_split_seed
 
         # A reset is required before the sim state dict is populated, and we need that
         # dict to derive the flat-state layout below.
@@ -199,32 +309,68 @@ class PushCubeWrapper(gym.Env):
         """
         pass
 
-    def sample_random_init_goal_states(self, seed):
-        """
-        Return two states: one initial, one goal.
-
-        The initial state is drawn from the task's own reset distribution. The goal is
-        that same state with only the cube translated to a uniformly random point inside
-        the goal region — which is exactly the set of states PushCube counts as success.
-        Sampling the goal from the *reset* distribution instead (the obvious analogue of
-        what PushTWrapper does) would produce goals where the cube has not been pushed at
-        all, which are not meaningful targets for this task.
-        """
-        rs = np.random.RandomState(seed)
-        self._env.reset(seed=int(seed))
-        init_state = self._get_state()
-
+    def _demo_goal_index(self):
+        """Lazily built, process-wide cached; see _build_demo_goal_index."""
+        if self._goal_data_path is None:
+            raise ValueError(
+                "PushCubeWrapper.sample_random_init_goal_states needs goal_data_path, "
+                "the recorded .h5 it draws demonstrated goals from. Planning passes it "
+                "through from env.dataset.data_path (see plan.py); set it in "
+                "conf/env/push_cube.yaml under `kwargs` if you are constructing the env "
+                "yourself."
+            )
         cube_start, _ = self._state_slices["env_states/actors/cube"]
         goal_start, _ = self._state_slices["env_states/actors/goal_region"]
+        key = (
+            str(self._goal_data_path),
+            self._goal_split,
+            self._goal_split_ratio,
+            self._goal_split_seed,
+        )
+        if key not in _DEMO_GOAL_INDEX_CACHE:
+            _DEMO_GOAL_INDEX_CACHE[key] = _build_demo_goal_index(
+                self._goal_data_path,
+                self.state_dim,
+                cube_start,
+                goal_start,
+                self._goal_split,
+                self._goal_split_ratio,
+                self._goal_split_seed,
+            )
+        return _DEMO_GOAL_INDEX_CACHE[key]
 
-        goal_state = init_state.copy()
-        radius, angle = GOAL_RADIUS * np.sqrt(rs.uniform()), rs.uniform(0, 2 * np.pi)
-        goal_state[cube_start] = init_state[goal_start] + radius * np.cos(angle)
-        goal_state[cube_start + 1] = init_state[goal_start + 1] + radius * np.sin(angle)
-        goal_state[cube_start + 2] = CUBE_HALF_SIZE
-        # A resting cube: zero out the 6 linear/angular velocity components.
-        goal_state[cube_start + 7 : cube_start + 13] = 0.0
-        return init_state, goal_state
+    def sample_random_init_goal_states(self, seed):
+        """
+        Return two states: one initial, one goal, both lifted from a single recorded
+        demonstration that actually solves the task.
+
+        Draws a uniformly random episode among those that reach PushCube's success
+        condition at some point, takes that episode's first state as the initial state,
+        and a uniformly random one of its success frames as the goal.
+
+        Two properties this buys over synthesizing the goal (which is what this used to
+        do — copy the init state and teleport the cube to a random point inside the goal
+        region):
+
+        - The goal is a state the simulator actually produced, with the arm wherever the
+          demonstrator left it. A synthetic goal pairs a pushed cube with an arm still in
+          its reset pose, which is off the data manifold the DINO encoder was trained on,
+          so its embedding is a poor target for the planner to descend toward.
+        - Init and goal come from the same episode, hence share a goal region, so
+          `eval_state` — which measures the cube against the *goal state's* goal region —
+          reports success exactly when the goal has been reached. Under
+          `goal_source: 'dset'` those two criteria come apart, because the goal is
+          whatever the demo happened to be doing goal_H world-model steps in.
+
+        Note this makes the goal a solved state rather than a fixed horizon away: the
+        distance from frame 0 to a success frame varies per episode, so difficulty varies
+        across evals and is not controlled by goal_H.
+        """
+        index = self._demo_goal_index()
+        rs = np.random.RandomState(seed)
+        init_state, goal_states = index[rs.randint(len(index))]
+        goal_state = goal_states[rs.randint(len(goal_states))]
+        return init_state.copy(), goal_state.copy()
 
     def eval_state(self, goal_state, cur_state):
         """
@@ -235,12 +381,12 @@ class PushCubeWrapper(gym.Env):
         cube_start, _ = self._state_slices["env_states/actors/cube"]
         goal_start, _ = self._state_slices["env_states/actors/goal_region"]
 
-        cube_xy = cur_state[cube_start : cube_start + 2]
-        target_xy = goal_state[goal_start : goal_start + 2]
-        cube_z = cur_state[cube_start + 2]
-
-        cube_dist = float(np.linalg.norm(cube_xy - target_xy))
-        success = bool(cube_dist < GOAL_RADIUS and cube_z < CUBE_HALF_SIZE + 5e-3)
+        success, cube_dist = _cube_success(
+            cur_state[cube_start : cube_start + 2],
+            cur_state[cube_start + 2],
+            goal_state[goal_start : goal_start + 2],
+        )
+        success, cube_dist = bool(success), float(cube_dist)
         return {
             "success": success,
             "state_dist": float(np.linalg.norm(goal_state - cur_state)),
