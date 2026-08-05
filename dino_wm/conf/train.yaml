@@ -1,7 +1,9 @@
 defaults:
   - _self_
   - env: ???
-  - encoder: dino 
+  # Must match the backbone the dataset's dino_patch_features were precomputed with
+  # (tools/preprocess_data_mmap.py) — see the warning in conf/encoder/dino.yaml.
+  - encoder: dinov3
   - action_encoder: proprio
   - proprio_encoder: proprio
   - decoder: vqvae

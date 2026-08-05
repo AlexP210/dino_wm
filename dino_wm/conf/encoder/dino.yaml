@@ -1,3 +1,10 @@
+# WARNING: this does NOT match the dino_patch_features in the ManiSkill datasets, which
+# tools/preprocess_data_mmap.py wrote with dinov3_vits16. Because encode_obs uses the
+# precomputed features during training and the live encoder only at inference, pairing
+# this with such a dataset trains the predictor/decoder in DINOv3 space and then plans in
+# DINOv2 space — with no shape error to catch it, since both yield 196x384 at img_size
+# 224. Use conf/encoder/dinov3.yaml with those datasets; this is for datasets whose
+# features were genuinely produced by DINOv2, or that carry no precomputed features.
 _target_: models.dino.DinoV2Encoder
 name: "dinov2_vits14"
 feature_key: "x_norm_patchtokens"
