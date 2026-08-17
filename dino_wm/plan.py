@@ -428,7 +428,7 @@ class DummyWandbRun:
 
 def planning_main(cfg_dict):
     output_dir = cfg_dict["saved_folder"]
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device(cfg_dict["device"] if torch.cuda.is_available() else "cpu")
     if cfg_dict["wandb_logging"]:
         wandb_run = wandb.init(
             project=f"plan_{cfg_dict['planner']['name']}", config=cfg_dict

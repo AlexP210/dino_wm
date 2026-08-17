@@ -56,3 +56,4 @@ planner:
 
 # Config variables to run inside TSD environment
 data_dir: ???
+device: cuda:0
