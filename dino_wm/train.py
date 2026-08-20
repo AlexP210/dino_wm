@@ -298,7 +298,7 @@ class Trainer:
                     if isinstance(ckpt, dict):
                         self.decoder = ckpt["decoder"]
                     else:
-                        self.decoder = torch.load(decoder_path)
+                        self.decoder = ckpt
                     log.info(f"Loaded decoder from {decoder_path}")
                 else:
                     self.decoder = hydra.utils.instantiate(

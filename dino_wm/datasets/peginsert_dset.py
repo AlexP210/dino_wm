@@ -17,9 +17,9 @@ from typing import Optional, Callable, Any
 # naturally selects the leading obs_t frames and drops the trailing terminal one.
 PROPRIO_KEYS = ["obs/agent/qpos", "obs/agent/qvel", "obs/extra/tcp_pose"]
 STATE_KEYS = [
-    "env_states/articulations/panda",
-    "env_states/actors/cube",
-    "env_states/actors/goal_region",
+    "env_states/articulations/panda_wristcam",
+    "env_states/actors/peg",
+    "env_states/actors/box_with_hole",
     "env_states/actors/table-workspace",
 ]
 RGB_KEY = "obs/sensor_data/hand_camera/rgb"
@@ -167,7 +167,7 @@ def _stage_to_slurm_tmpdir(data_path: Path) -> Path:
     return local
 
 
-class PushBlockDataset(TrajDataset):
+class PegInsertDataset(TrajDataset):
     def __init__(
         self,
         data_path,
@@ -326,7 +326,7 @@ class PushBlockDataset(TrajDataset):
         elif isinstance(imgs, torch.Tensor):
             return rearrange(imgs, "b h w c -> b c h w") / 255.0
 
-def load_pushcube_slice_train_val(
+def load_peginsert_slice_train_val(
     transform,
     data_path,
     n_rollout=None,
@@ -336,7 +336,7 @@ def load_pushcube_slice_train_val(
     num_pred=0,
     frameskip=0,
 ):
-    dset = PushBlockDataset(
+    dset = PegInsertDataset(
         n_rollout=n_rollout,
         transform=transform,
         data_path=data_path,

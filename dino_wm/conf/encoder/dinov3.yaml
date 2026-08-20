@@ -5,5 +5,5 @@ feature_key: "x_norm_patchtokens"
 # These MUST be the checkout and weights tools/preprocess_data_mmap.py encoded the
 # dataset's dino_patch_features with. encode_obs uses the precomputed features during
 # training and this encoder during planning, so a mismatch is invisible until inference.
-repo_dir: ${oc.env:PROJECT_ROOT,/home/AlexPleava/projects/tsd-project}/dependencies/dinov3
-weights: ${oc.env:DINOV3_WEIGHTS,/data/AlexPleava/pretrained_checkpoints/dino/dinov3_vits16_pretrain_lvd1689m-08c60483.pth}
+repo_dir: ${oc.env:PROJECT_ROOT}/dependencies/dinov3
+weights: ${oc.env:CHECKPOINT_DIR}/dino/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
