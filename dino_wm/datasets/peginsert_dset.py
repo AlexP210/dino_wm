@@ -78,13 +78,23 @@ class _H5View:
 
     def __getitem__(self, idx):
         dataset = _open_file(self.path)[self.name]
-        # h5py's list-selection reads element by element and demands strictly increasing
-        # indices; get_frames asks for a contiguous ascending run, which is both allowed
-        # and far cheaper to fetch as a single slice.
+        # h5py's list-selection reads element by element, re-fetching (and re-inflating)
+        # every chunk an index touches once per index. That is ruinous here: with a chunk
+        # shape like (13, 56, 56, 1) a single frame spans 48 chunks, so a 4-frame fancy
+        # read costs more than twice a 20-frame slice.
+        #
+        # get_frames asks for an ascending run of frames — contiguous at frameskip 1,
+        # strided above it — so either way one slice over the enclosing span is cheaper.
+        # The strided case then picks its frames out of that already-decompressed block,
+        # which reads (num_frames - 1) * frameskip + 1 frames instead of the full window.
         if isinstance(idx, (list, np.ndarray)):
             idx = list(idx)
-            if idx and idx == list(range(idx[0], idx[-1] + 1)):
-                return dataset[idx[0]: idx[-1] + 1]
+            if idx:
+                lo, hi = idx[0], idx[-1]
+                if idx == list(range(lo, hi + 1)):
+                    return dataset[lo:hi + 1]
+                if all(b > a for a, b in zip(idx, idx[1:])):
+                    return dataset[lo:hi + 1][[i - lo for i in idx]]
         return dataset[idx]
 
     def __len__(self):
@@ -289,14 +299,22 @@ class PegInsertDataset(TrajDataset):
             result.append(self.actions[i, :T, :])
         return torch.cat(result, dim=0)
 
-    def get_frames(self, idx, frames):
+    def get_frames(self, idx, frames, action_frames=None):
+        """
+        `frames` selects the observation/state frames to return. `action_frames`
+        selects the action frames independently; the trajectory slicer passes the
+        dense window there while striding `frames`, so actions can be concatenated
+        across a frameskip window without paying to read the frames in between.
+        Defaults to `frames`.
+        """
         frames = list(frames)
+        action_frames = frames if action_frames is None else list(action_frames)
         # Fancy-indexing an np.memmap view allocates a fresh, contiguous, writable array
         # and is the point where only the touched pages are read from disk (OS page cache
         # serves repeat touches, e.g. across epochs, at close to RAM speed).
         image = torch.from_numpy(self.rgb_views[idx][frames])   # THWC uint8
         proprio = self.proprios[idx, frames]
-        act = self.actions[idx, frames]
+        act = self.actions[idx, action_frames]
         state = self.states[idx, frames]
 
         image = image.float() / 255.0

@@ -79,11 +79,19 @@ class PointMazeDataset(TrajDataset):
             result.append(self.actions[i, :T, :])
         return torch.cat(result, dim=0)
 
-    def get_frames(self, idx, frames):
+    def get_frames(self, idx, frames, action_frames=None):
+        """
+        `frames` selects the observation/state frames to return. `action_frames`
+        selects the action frames independently; the trajectory slicer passes the
+        dense window there while striding `frames`, so actions can be concatenated
+        across a frameskip window without paying to read the frames in between.
+        Defaults to `frames`.
+        """
+        action_frames = frames if action_frames is None else action_frames
         obs_dir = self.data_path / "obses"
         image = torch.load(obs_dir / f"episode_{idx:03d}.pth")
         proprio = self.proprios[idx, frames]
-        act = self.actions[idx, frames]
+        act = self.actions[idx, action_frames]
         state = self.states[idx, frames]
 
         image = image[frames]  # THWC

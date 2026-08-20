@@ -95,10 +95,15 @@ class TrajSlicerDataset(TrajDataset):
         # datasets this is what keeps I/O bounded to the pages actually used — pulling
         # the full trajectory here (and slicing after) re-reads every episode once per
         # window and defeats the mmap entirely.
-        obs, act, state, _ = self.dataset.get_frames(i, range(start, end))
-        for k, v in obs.items():
-            obs[k] = v[::self.frameskip]
-        state = state[::self.frameskip]
+        #
+        # Observations are read at the frameskip stride, so only the num_frames frames
+        # actually returned are ever touched. Reading the dense window and subsampling
+        # afterwards costs frameskip times the I/O, the uint8->float conversion and the
+        # transform, then throws (frameskip - 1) / frameskip of that work away. Actions
+        # still need the dense window — they are concatenated, not subsampled.
+        obs, act, state, _ = self.dataset.get_frames(
+            i, range(start, end, self.frameskip), action_frames=range(start, end)
+        )
         act = rearrange(act, "(n f) d -> n (f d)", n=self.num_frames)  # concat actions
         return tuple([obs, act, state])
 
