@@ -42,3 +42,19 @@ register(
     max_episode_steps=50,
     disable_env_checker=True,
 )
+# Same registration shape as push_cube above: ManiSkill's own max_episode_steps for the task
+# (which is also the recorded trajectory length), and the env checker off because reset()
+# returns (obs, state) rather than the (obs, info) gym expects.
+register(
+    id="lift_peg",
+    entry_point="env.liftpeg.liftpeg_wrapper:LiftPegUprightWrapper",
+    max_episode_steps=50,
+    disable_env_checker=True,
+)
+
+register(
+    id="place_sphere",
+    entry_point="env.placesphere.placesphere_wrapper:PlaceSphereWrapper",
+    max_episode_steps=50,
+    disable_env_checker=True,
+)

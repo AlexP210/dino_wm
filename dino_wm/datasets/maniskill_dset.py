@@ -1,3 +1,17 @@
+"""Loading ManiSkill trajectory recordings, independent of which task produced them.
+
+Everything here is task-agnostic: camera detection, the two storage layouts a recording can have
+(gzipped straight out of tools/replay_trajectory.py, or contiguous after
+tools/preprocess_data.py --memmap), $SLURM_TMPDIR staging, the frame-stack/frameskip windowing the
+trajectory slicer asks for, and the normalization statistics.
+
+A task module supplies only the two things that differ -- which recorded fields make up its flat
+proprio and state vectors -- by subclassing `ManiSkillTrajDataset`; see pushcube_dset.py and
+liftpeg_dset.py. Sharing rather than copying is deliberate: the copies this replaces had already
+drifted from each other, one of them looking for its DINO features under a camera its images did
+not come from, which does not fail loudly -- it silently yields observations with no features.
+"""
+import abc
 import os
 import shutil
 
@@ -7,23 +21,41 @@ import numpy as np
 from tqdm import tqdm
 from pathlib import Path
 from einops import rearrange
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 from .traj_dset import TrajDataset, get_train_val_sliced
-from typing import Optional, Callable, Any
 
-# ManiSkill PushCube-v1 trajectories store one extra observation frame per
-# episode relative to the number of actions (obs_t, act_t -> obs_{t+1}).
-# get_seq_length() is set to the action count, so range(get_seq_length(idx))
-# naturally selects the leading obs_t frames and drops the trailing terminal one.
-PROPRIO_KEYS = ["obs/agent/qpos", "obs/agent/qvel", "obs/extra/tcp_pose"]
-STATE_KEYS = [
-    "env_states/articulations/panda_wristcam",
-    "env_states/actors/peg",
-    "env_states/actors/box_with_hole",
-    "env_states/actors/table-workspace",
-]
-RGB_KEY = "obs/sensor_data/hand_camera/rgb"
-DINO_KEY = "obs/sensor_data/base_camera/dino_patch_features"
+RGB_TEMPLATE = "obs/sensor_data/{camera}/rgb"
+DINO_TEMPLATE = "obs/sensor_data/{camera}/dino_patch_features"
+
+
+def _detect_camera(traj: h5py.Group, camera: Optional[str], path: Path) -> str:
+    """Which sensor's images this recording carries.
+
+    Read off the file rather than hardcoded, because which camera a recording holds is a
+    property of how it was replayed: `--camera-view wrist` writes `hand_camera` and drops the
+    task's own camera, `focused`/`default` write `base_camera`. Deriving it here means the rgb
+    and the DINO features can never be looked up under different cameras -- a mismatch that
+    costs nothing at load time (both the dataset loader and the env wrapper silently skip
+    observation paths they cannot resolve) and only surfaces much later as a missing key.
+    """
+    sensors = traj.get("obs/sensor_data")
+    if sensors is None:
+        raise ValueError(
+            f"{path.name} has no obs/sensor_data: this is a state-only recording (obs_mode="
+            "state, what tools/ppo_stages_fast.py writes). Render it to images first with "
+            "tools/replay_trajectory.py -o rgb --camera-view <view> --save-traj."
+        )
+    cameras = sorted(name for name in sensors if "rgb" in sensors[name])
+    if camera is not None:
+        if camera not in cameras:
+            raise ValueError(f"{path.name} has no rgb for camera {camera!r}; it has {cameras}")
+        return camera
+    if len(cameras) != 1:
+        raise ValueError(
+            f"{path.name} carries {len(cameras)} cameras with rgb ({cameras}); pass "
+            "`camera=` to say which one the world model should see."
+        )
+    return cameras[0]
 
 
 def _view_dataset(raw: np.memmap, dataset: h5py.Dataset) -> Optional[np.ndarray]:
@@ -177,7 +209,29 @@ def _stage_to_slurm_tmpdir(data_path: Path) -> Path:
     return local
 
 
-class PegInsertDataset(TrajDataset):
+class ManiSkillTrajDataset(TrajDataset, abc.ABC):
+    """One ManiSkill recording as fixed-length trajectories; subclass per task.
+
+    ManiSkill trajectories store one extra observation frame per episode relative to the
+    number of actions (obs_t, act_t -> obs_{t+1}). `get_seq_length()` is the action count, so
+    `range(get_seq_length(idx))` naturally selects the leading obs_t frames and drops the
+    trailing terminal one.
+    """
+
+    @property
+    @abc.abstractmethod
+    def proprio_keys(self) -> Sequence[str]:
+        """Recorded fields concatenated into the flat proprio vector, in order."""
+
+    @property
+    @abc.abstractmethod
+    def state_keys(self) -> Sequence[str]:
+        """Recorded fields concatenated into the flat state vector, in order.
+
+        The order is part of the contract, not an implementation detail: env wrappers slice
+        these vectors back apart by offset (see env/pushcube/pushcube_wrapper.py).
+        """
+
     def __init__(
         self,
         data_path,
@@ -185,6 +239,7 @@ class PegInsertDataset(TrajDataset):
         transform: Optional[Callable] = None,
         normalize_action: bool = False,
         action_scale=1.0,
+        camera: Optional[str] = None,
     ):
         self.data_path = _stage_to_slurm_tmpdir(Path(data_path))
         self.transform = transform
@@ -202,22 +257,28 @@ class PegInsertDataset(TrajDataset):
             if n_rollout:
                 traj_keys = traj_keys[:n_rollout]
 
-            # Both of these are properties of how the file was written, so the first
+            # All three of these are properties of how the file was written, so the first
             # trajectory settles them for the whole dataset. A file straight out of
-            # replay_trajectory.py has neither: no DINO features, and gzip-compressed
-            # rgb. tools/preprocess_data_mmap.py is what adds both.
+            # replay_trajectory.py has gzipped rgb and no DINO features; the two
+            # tools/preprocess_data.py flags add each independently, so all four combinations
+            # occur and every one of them has to load.
             first_traj = f[traj_keys[0]]
-            has_dino = DINO_KEY in first_traj
+            self.camera = _detect_camera(first_traj, camera, self.data_path)
+            rgb_key = RGB_TEMPLATE.format(camera=self.camera)
+            dino_key = DINO_TEMPLATE.format(camera=self.camera)
+
+            has_dino = dino_key in first_traj
             if not has_dino:
                 print(
-                    f"No {DINO_KEY!r} in {self.data_path.name} — observations will carry no "
-                    "precomputed DINO features, so the encoder runs on raw images instead."
+                    f"No {dino_key!r} in {self.data_path.name} — observations will carry no "
+                    "precomputed DINO features, so the encoder runs on raw images instead. "
+                    f"tools/preprocess_data.py --dino-fp16 --camera {self.camera} adds them."
                 )
-            if first_traj[RGB_KEY].id.get_offset() is None:
+            if first_traj[rgb_key].id.get_offset() is None:
                 print(
-                    f"{RGB_KEY!r} in {self.data_path.name} is chunked and/or compressed, so it "
+                    f"{rgb_key!r} in {self.data_path.name} is chunked and/or compressed, so it "
                     "cannot be memory-mapped; falling back to reading through h5py. Expect "
-                    "slower loading — tools/preprocess_data_mmap.py writes a mappable copy."
+                    "slower loading — tools/preprocess_data.py --memmap writes a mappable copy."
                 )
 
             actions, states, proprios, seq_lengths = [], [], [], []
@@ -226,15 +287,15 @@ class PegInsertDataset(TrajDataset):
                 traj = f[key]
                 actions.append(torch.from_numpy(traj["actions"][:]).float())
                 proprios.append(torch.cat(
-                    [torch.from_numpy(traj[k][:]).float() for k in PROPRIO_KEYS], dim=-1
+                    [torch.from_numpy(traj[k][:]).float() for k in self.proprio_keys], dim=-1
                 ))
                 states.append(torch.cat(
-                    [torch.from_numpy(traj[k][:]).float() for k in STATE_KEYS], dim=-1
+                    [torch.from_numpy(traj[k][:]).float() for k in self.state_keys], dim=-1
                 ))
                 seq_lengths.append(actions[-1].shape[0])
-                rgb_views.append(_frame_view(self._raw_mmap, traj[RGB_KEY]))
+                rgb_views.append(_frame_view(self._raw_mmap, traj[rgb_key]))
                 if has_dino:
-                    dino_views.append(_frame_view(self._raw_mmap, traj[DINO_KEY]))
+                    dino_views.append(_frame_view(self._raw_mmap, traj[dino_key]))
 
         self.traj_keys = traj_keys
         self.rgb_views = rgb_views
@@ -344,7 +405,9 @@ class PegInsertDataset(TrajDataset):
         elif isinstance(imgs, torch.Tensor):
             return rearrange(imgs, "b h w c -> b c h w") / 255.0
 
-def load_peginsert_slice_train_val(
+
+def load_maniskill_slice_train_val(
+    dataset_cls,
     transform,
     data_path,
     n_rollout=None,
@@ -353,12 +416,15 @@ def load_peginsert_slice_train_val(
     num_hist=0,
     num_pred=0,
     frameskip=0,
+    camera=None,
 ):
-    dset = PegInsertDataset(
+    """Build `dataset_cls` over `data_path` and slice it into train/valid windows."""
+    dset = dataset_cls(
         n_rollout=n_rollout,
         transform=transform,
         data_path=data_path,
         normalize_action=normalize_action,
+        camera=camera,
     )
     dset_train, dset_val, train_slices, val_slices = get_train_val_sliced(
         traj_dataset=dset,
