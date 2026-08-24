@@ -13,7 +13,7 @@ defaults:
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
 ckpt_base_path: ??? # put absolute path here
 # folder containing a previous run to resume from
-resume_folder: ${ckpt_base_path}/outputs/2026-07-29/02-55-09
+resume_folder: null
 
 hydra:
   run:
@@ -36,7 +36,7 @@ hydra:
 training:
   seed: 0
   epochs: 100
-  batch_size: 16 # should >= nodes * tasks_per_node
+  batch_size: 32 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   save_best: True
   reconstruct_every_x_batch: 500
