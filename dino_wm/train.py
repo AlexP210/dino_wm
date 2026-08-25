@@ -226,6 +226,18 @@ class Trainer:
             if model_ckpt.exists():
                 self.load_ckpt(model_ckpt)
                 log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+            else:
+                # Falling through here leaves every module below at its random
+                # initialization, and nothing downstream can tell the difference: training
+                # silently restarts from scratch, and anything that only borrows this
+                # Trainer as a model factory -- a frozen world model being planned or
+                # evaluated -- silently does so with untrained weights.
+                raise FileNotFoundError(
+                    f"resume_folder is set to '{self.cfg.resume_folder}' but it holds no "
+                    f"checkpoint at {model_ckpt}. Point resume_folder at the run directory "
+                    f"that contains checkpoints/model_latest.pth, or set it to null to "
+                    f"start from a random initialization deliberately."
+                )
 
         # initialize encoder
         if self.encoder is None:
