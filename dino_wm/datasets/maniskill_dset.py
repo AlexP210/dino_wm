@@ -141,6 +141,33 @@ def _frame_view(raw: np.memmap, dataset: h5py.Dataset):
     return _H5View(dataset.file.filename, dataset.name, dataset.shape, dataset.dtype)
 
 
+def _copy_with_progress(src: Path, dst: Path, size: int, chunk: int = 32 << 20) -> None:
+    """Byte-for-byte copy of `src` to `dst`, ticking a progress bar as it goes.
+
+    shutil.copyfile is marginally faster (it can hand the whole transfer to the kernel via
+    copy_file_range/sendfile), but staging a multi-GB dataset off a networked filesystem runs
+    for minutes, and a job that prints nothing for minutes is indistinguishable from a hung
+    one. `mininterval` keeps the log readable when stderr is a file rather than a terminal,
+    where tqdm cannot rewrite a line in place and every update becomes another line.
+    """
+    with open(src, "rb") as fsrc, open(dst, "wb") as fdst, tqdm(
+        total=size,
+        desc=f"Copying {src.name}",
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+        mininterval=5.0,
+    ) as bar:
+        buf = bytearray(chunk)
+        view = memoryview(buf)
+        while True:
+            n = fsrc.readinto(buf)
+            if not n:
+                break
+            fdst.write(view[:n])
+            bar.update(n)
+
+
 def _stage_to_slurm_tmpdir(data_path: Path) -> Path:
     """
     Stage the dataset on node-local disk ($SLURM_TMPDIR) and return the local copy's path.
@@ -194,7 +221,7 @@ def _stage_to_slurm_tmpdir(data_path: Path) -> Path:
         flush=True,
     )
     try:
-        shutil.copyfile(data_path, partial)
+        _copy_with_progress(data_path, partial, size)
         os.replace(partial, local)
     except OSError as e:
         # Out of space, a vanished tmpdir, a concurrent rank filling the disk: none of these
