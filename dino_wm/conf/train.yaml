@@ -16,10 +16,13 @@ ckpt_base_path: ??? # put absolute path here
 resume_folder: null
 
 hydra:
+  # ${env.name} keeps concurrent Slurm array tasks (one env per task) in separate
+  # run dirs. Without it they share a dir whenever they start in the same second,
+  # and overwrite each other's checkpoints, configs and logs.
   run:
-    dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${env.name}
   sweep:
-    dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: ${ckpt_base_path}/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${env.name}
     subdir: ${hydra.job.num}
   # launcher:
   #   submitit_folder: ${hydra.sweep.dir}/.submitit/%j
