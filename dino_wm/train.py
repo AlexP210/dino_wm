@@ -249,20 +249,31 @@ class Trainer:
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
-        self.proprio_encoder = hydra.utils.instantiate(
-            self.cfg.proprio_encoder,
-            in_chans=self.datasets["train"].proprio_dim,
-            emb_dim=self.cfg.proprio_emb_dim,
-        )
+        # Guarded like the encoder above and the predictor/decoder below: `load_ckpt` has
+        # already put the checkpoint's modules here, and re-instantiating would silently
+        # replace trained weights with a fresh random init. Both are in `_keys_to_save`, so
+        # this is not a case of "the checkpoint never carried them" -- unguarded, a resumed
+        # training run reset its proprio/action encoders every restart, and anything using
+        # Trainer purely as a model factory (a frozen world model being planned with) got
+        # random ones outright. With concat_dim=1 the action embedding is the only channel
+        # carrying a candidate action into the predictor, so that is a planner optimizing
+        # noise.
+        if self.proprio_encoder is None:
+            self.proprio_encoder = hydra.utils.instantiate(
+                self.cfg.proprio_encoder,
+                in_chans=self.datasets["train"].proprio_dim,
+                emb_dim=self.cfg.proprio_emb_dim,
+            )
         proprio_emb_dim = self.proprio_encoder.emb_dim
         print(f"Proprio encoder type: {type(self.proprio_encoder)}")
         self.proprio_encoder = self.accelerator.prepare(self.proprio_encoder)
 
-        self.action_encoder = hydra.utils.instantiate(
-            self.cfg.action_encoder,
-            in_chans=self.datasets["train"].action_dim,
-            emb_dim=self.cfg.action_emb_dim,
-        )
+        if self.action_encoder is None:
+            self.action_encoder = hydra.utils.instantiate(
+                self.cfg.action_encoder,
+                in_chans=self.datasets["train"].action_dim,
+                emb_dim=self.cfg.action_emb_dim,
+            )
         action_emb_dim = self.action_encoder.emb_dim
         print(f"Action encoder type: {type(self.action_encoder)}")
 
