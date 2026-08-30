@@ -22,14 +22,21 @@ hydra:
   #           "export MASTER_PORT=$(for port in $(shuf -i 30000-65500 -n 20); do if [[ $(netstat -tupln 2>&1 | grep $port | wc -l) -eq 0 ]] ; then echo $port; break; fi; done;)",]
 
 # model to load for planning
-ckpt_base_path: ??? # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
-model_name: 2026-08-01/23-00-56
+ckpt_base_path: /data/AlexPleava/outputs/dino # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
+model_name: 2026-08-26/11-19-56_push_cube
 model_epoch: latest
 
 seed: 99
 n_evals: 25
-goal_source: 'random_state'
-goal_H: 5 
+# 'random_state': start at an episode's reset state, goal is a random success frame of
+#   that same episode -- end-to-end task, horizon uncontrolled by goal_H.
+# 'dset_success': a frameskip*goal_H segment straddling the success boundary -- starts
+#   unsolved, ends solved. Short-horizon and feasible by construction like 'dset', but
+#   with a solved goal, so the reported success flag measures goal-reaching.
+# 'dset': a frameskip*goal_H segment at a uniformly random offset; the goal is usually
+#   not a solved state, so `success` reports task completion, not goal-reaching.
+goal_source: 'dset_success'
+goal_H: 5
 n_plot_samples: 10
 
 debug_dset_init: False
@@ -42,7 +49,7 @@ objective:
 
 planner:
   _target_: planning.mpc.MPCPlanner
-  max_iter: 2 
+  max_iter: 10
   n_taken_actions: 5
   sub_planner:
     target: planning.cem.CEMPlanner
@@ -55,5 +62,7 @@ planner:
   name: mpc_cem
 
 # Config variables to run inside TSD environment
+checkpoint_dir: ???
+output_dir: ???
 data_dir: ???
 device: cuda:0

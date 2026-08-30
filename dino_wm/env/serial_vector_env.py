@@ -18,6 +18,24 @@ class SerialVectorEnv:
     def sample_random_init_goal_states(self, seed):
         init_state, goal_state = zip(*(self.envs[i].sample_random_init_goal_states(seed[i]) for i in range(self.num_envs)))
         return np.stack(init_state), np.stack(goal_state)
+
+    def success_track(self, states):
+        """
+        Per-frame success flags for a whole state track: (T, state_dim) -> (T,) bool.
+
+        Only defined for envs carrying a state-space success predicate (the ManiSkill
+        wrappers' `evaluate_states`); goal_source='dset_success' checks for this method
+        rather than assuming it. Env 0 answers for all of them -- every env here is the
+        same task, and the flags depend only on the states passed in.
+
+        Both arguments to evaluate_states are the same track because a task's goal
+        geometry travels inside its own state vector, so a track scored against itself
+        is scored against its own episode's goal (see
+        ManiSkillPlanningWrapper.evaluate_states).
+        """
+        ok, _ = self.envs[0].evaluate_states(states, states)
+        return np.asarray(ok)
+
     
     def update_env(self, env_info):
         [self.envs[i].update_env(env_info[i]) for i in range(self.num_envs)]

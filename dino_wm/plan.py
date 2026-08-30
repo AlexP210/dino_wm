@@ -229,9 +229,19 @@ class PlanWorkspace:
             self.state_g = rand_goal_state
             self.gt_actions = None
         else:
+            # 'dset_success' picks its segments deliberately (see
+            # sample_success_boundary_segments); 'dset' and 'random_action' leave the
+            # trajectory and offset to the uniform draw inside the sampler.
+            segments = (
+                self.sample_success_boundary_segments()
+                if self.goal_source == "dset_success"
+                else None
+            )
             # update env config from val trajs
             observations, states, actions, env_info = (
-                self.sample_traj_segment_from_dset(traj_len=self.frameskip * self.goal_H + 1)
+                self.sample_traj_segment_from_dset(
+                    traj_len=self.frameskip * self.goal_H + 1, segments=segments
+                )
             )
             self.env.update_env(env_info)
 
@@ -258,31 +268,55 @@ class PlanWorkspace:
             self.state_0 = init_state  # (b, d)
             self.state_g = rollout_states[:, -1]  # (b, d)
             self.gt_actions = wm_actions
+            if self.goal_source == "dset_success":
+                self.report_goal_is_success()
 
-    def sample_traj_segment_from_dset(self, traj_len):
+    def sample_traj_segment_from_dset(self, traj_len, segments=None):
+        """
+        Args:
+            traj_len: number of observation/state frames each segment must contain.
+            segments: optional list of (traj_id, offset) of length n_evals, chosen by the
+                caller. When None, both are drawn uniformly at random, which is the
+                'dset' / 'random_action' behavior. 'dset_success' passes the pairs its
+                own boundary search selected.
+        """
         states = []
         actions = []
         observations = []
         env_info = []
 
-        # Check if any trajectory is long enough
-        valid_traj = [
-            self.dset[i][0]["visual"].shape[0]
-            for i in range(len(self.dset))
-            if self.dset[i][0]["visual"].shape[0] >= traj_len
-        ]
-        if len(valid_traj) == 0:
-            raise ValueError("No trajectory in the dataset is long enough.")
+        # Check if any trajectory is long enough. Skipped when the caller chose the
+        # segments: it already established their trajectories are long enough, and this
+        # check reads every validation trajectory's images in full (through
+        # self.dset[i]) to look at nothing but a frame count -- tens of GB of
+        # decompression on a recording like PushCube's.
+        if segments is None:
+            valid_traj = [
+                self.dset[i][0]["visual"].shape[0]
+                for i in range(len(self.dset))
+                if self.dset[i][0]["visual"].shape[0] >= traj_len
+            ]
+            if len(valid_traj) == 0:
+                raise ValueError("No trajectory in the dataset is long enough.")
 
         # sample init_states from dset
         for i in range(self.n_evals):
-            max_offset = -1
-            while max_offset < 0:  # filter out traj that are not long enough
-                traj_id = random.randint(0, len(self.dset) - 1)
+            if segments is None:
+                max_offset = -1
+                while max_offset < 0:  # filter out traj that are not long enough
+                    traj_id = random.randint(0, len(self.dset) - 1)
+                    obs, act, state, e_info = self.dset[traj_id]
+                    max_offset = obs["visual"].shape[0] - traj_len
+                offset = random.randint(0, max_offset)
+            else:
+                traj_id, offset = segments[i]
                 obs, act, state, e_info = self.dset[traj_id]
-                max_offset = obs["visual"].shape[0] - traj_len
+                if obs["visual"].shape[0] < offset + traj_len:
+                    raise ValueError(
+                        f"segment ({traj_id}, {offset}) needs {traj_len} frames but "
+                        f"trajectory {traj_id} has {obs['visual'].shape[0]}."
+                    )
             state = state.numpy()
-            offset = random.randint(0, max_offset)
             obs = {
                 key: arr[offset : offset + traj_len]
                 for key, arr in obs.items()
@@ -294,6 +328,116 @@ class PlanWorkspace:
             observations.append(obs)
             env_info.append(e_info)
         return observations, states, actions, env_info
+
+    def _traj_state_track(self, traj_id):
+        """Raw (T, state_dim) state track of one trajectory, without reading its images.
+
+        Going through self.dset[traj_id] would decompress and transform that trajectory's
+        entire RGB track, which is ruinous when scanning every validation trajectory.
+        `states` is a padded (N, T, D) tensor already resident on the underlying dataset,
+        and -- unlike actions and proprios -- it is left unnormalized, which is what the
+        env's success predicate expects. TrajSubset forwards the attribute but not the
+        index remapping, hence the explicit indices lookup.
+        """
+        return self.dset.states[
+            self.dset.indices[traj_id], : int(self.dset.get_seq_length(traj_id))
+        ].numpy()
+
+    def sample_success_boundary_segments(self):
+        """
+        Choose (traj_id, offset) pairs whose segment straddles the task's success
+        boundary: its first frame fails the success predicate and its last frame passes
+        it, so the crossing falls strictly inside the segment.
+
+        This is the one regime where both properties hold at once:
+
+        - The goal is exactly frameskip * goal_H steps away, reachable by construction,
+          with `gt_actions` a known solution -- the short-horizon guarantee 'dset' gives.
+        - The goal is a *solved* state, so eval_state's success flag measures whether the
+          goal was reached. Under plain 'dset' the goal is wherever the demo happened to
+          be goal_H steps in, which is usually not solved, and the two criteria come apart
+          (see ManiSkillPlanningWrapper.evaluate_states).
+
+        Episodes are weighted equally rather than by how many crossings each contains,
+        matching how sample_random_init_goal_states draws an episode and then a frame.
+
+        Note this draws through `random`, so unlike the init/goal pair under
+        'random_state' -- keyed to eval_seed, which is 1 regardless of cfg.seed at
+        n_evals=1 -- the segment here does respond to cfg.seed.
+        """
+        if not hasattr(self.env, "success_track"):
+            raise ValueError(
+                "goal_source='dset_success' needs an env exposing a state-space success "
+                "predicate (SerialVectorEnv.success_track over the ManiSkill wrappers' "
+                f"evaluate_states); {type(self.env).__name__} for '{self.env_name}' has "
+                "none, so there is no success boundary to straddle."
+            )
+
+        seg_len = self.frameskip * self.goal_H  # steps between the segment's two ends
+        offsets_per_traj = {}
+        n_crossings = 0
+        for traj_id in range(len(self.dset)):
+            ok = self.env.success_track(self._traj_state_track(traj_id))
+            end = np.arange(seg_len, len(ok))
+            crossing = end[ok[end] & ~ok[end - seg_len]]
+            if len(crossing) > 0:
+                offsets_per_traj[traj_id] = (crossing - seg_len).tolist()
+                n_crossings += len(crossing)
+
+        if not offsets_per_traj:
+            raise ValueError(
+                f"No trajectory in the {len(self.dset)}-episode split contains a segment "
+                f"of {seg_len} steps that starts unsolved and ends solved, so nothing "
+                f"straddles {self.env_name}'s success boundary. goal_H={self.goal_H} at "
+                f"frameskip={self.frameskip} is likely too long or too short for this task."
+            )
+
+        traj_ids = sorted(offsets_per_traj)
+        print(
+            f"dset_success: {n_crossings} boundary-straddling segments of {seg_len} steps "
+            f"across {len(traj_ids)}/{len(self.dset)} episodes"
+        )
+        segments = []
+        for _ in range(self.n_evals):
+            traj_id = traj_ids[random.randint(0, len(traj_ids) - 1)]
+            offsets = offsets_per_traj[traj_id]
+            segments.append((traj_id, offsets[random.randint(0, len(offsets) - 1)]))
+        print(f"dset_success: planning (traj_id, offset) = {segments}")
+        return segments
+
+    def report_goal_is_success(self):
+        """
+        Check the *replayed* goal still passes the predicate its segment was chosen for.
+
+        The segment is selected on the recorded state track, but the goal handed to the
+        planner is the last frame of replaying the recorded actions in the live sim (see
+        prepare_targets), and the two differ by the sim's replay error. That matters
+        precisely here: a segment ending on its episode's first success frame sits right
+        at the predicate's threshold, so a small drift can push the goal back outside it
+        -- quietly restoring the goal/success mismatch this mode exists to remove. Later
+        crossing frames have the object further inside and are not at risk.
+
+        Reported rather than resampled: the segment is only unusable if the drift actually
+        crossed back, and which evals that happened to is what a reader needs to see.
+        """
+        eval_g = self.env.eval_state(self.state_g, self.state_g)
+        success = np.asarray(eval_g["success"]).reshape(-1)
+        for i in range(self.n_evals):
+            # state_dist is the goal against itself here, i.e. identically 0; the task's
+            # own metrics say how far inside the threshold the goal actually sits.
+            detail = ", ".join(
+                f"{name}={np.asarray(value).reshape(-1)[i]:.4f}"
+                for name, value in eval_g.items()
+                if name not in ("success", "state_dist")
+            )
+            print(f"dset_success: eval {i} goal solved={bool(success[i])}  {detail}")
+        if not success.all():
+            print(
+                f"dset_success: WARNING -- {int((~success).sum())}/{self.n_evals} replayed "
+                "goals fail the success predicate, so for those evals the final success "
+                "flag no longer measures goal-reaching. Replay drift moved the object back "
+                "across the threshold; re-run with a different seed."
+            )
 
     def prepare_targets_from_file(self, file_path):
         with open(file_path, "rb") as f:
