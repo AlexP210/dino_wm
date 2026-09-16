@@ -1,0 +1,19 @@
+name: pick_cube
+args: []
+kwargs:
+  # Where sample_random_init_goal_states (goal_source: 'random_state') draws demonstrated
+  # init/goal pairs from — the same recording the world model trains on.
+  goal_data_path: ${env.dataset.data_path}
+
+dataset:
+  _target_: "datasets.pickcube_dset.load_pickcube_slice_train_val"
+  n_rollout: null
+  normalize_action: ${normalize_action}
+  data_path: ${data_dir}/maniskill/PickCube-v1.1-ppo-staged-pd_ee_delta_pos/videos/trajectory.rgb.pd_ee_delta_pos.physx_cuda.dino16.mmap.frac1.0.h5
+  split_ratio: 0.8
+  transform:
+    _target_: "datasets.img_transforms.default_transform"
+    img_size: ${img_size}
+
+decoder_path: null
+num_workers: 16
