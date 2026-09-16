@@ -58,3 +58,10 @@ register(
     max_episode_steps=50,
     disable_env_checker=True,
 )
+
+register(
+    id="pick_cube",
+    entry_point="env.pickcube.pickcube_wrapper:PickCubeWrapper",
+    max_episode_steps=50,
+    disable_env_checker=True,
+)

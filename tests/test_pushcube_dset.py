@@ -25,10 +25,13 @@ FIXTURES = tempfile.mkdtemp(prefix="pushcube_dset_")
 PUSHCUBE_ACTORS = ("cube", "goal_region", "table-workspace")
 LIFTPEG_ACTORS = ("peg", "table-workspace")
 PLACESPHERE_ACTORS = ("sphere", "bin", "table-workspace")
+PICKCUBE_ACTORS = ("cube", "goal_site", "table-workspace")
+# PickCube alone carries goal_pos in proprio: its goal_site is hidden from every camera
+PICKCUBE_EXTRA = (("goal_pos", 3),)
 
 
 def _write(path, camera="hand_camera", compress=False, dino=False, images=True, episodes=2,
-           actors=PUSHCUBE_ACTORS):
+           actors=PUSHCUBE_ACTORS, extra_dims=()):
     """One h5 in the schema replay_trajectory.py produces, in either storage layout."""
     rng = np.random.RandomState(0)
     with h5py.File(path, "w") as f:
@@ -41,6 +44,10 @@ def _write(path, camera="hand_camera", compress=False, dino=False, images=True, 
             g.create_dataset("obs/agent/qpos", data=rng.rand(T + 1, 9).astype(np.float32))
             g.create_dataset("obs/agent/qvel", data=rng.rand(T + 1, 9).astype(np.float32))
             g.create_dataset("obs/extra/tcp_pose", data=rng.rand(T + 1, 7).astype(np.float32))
+            # tasks whose proprio is not the plain qpos+qvel+tcp_pose 25 (PickCube adds goal_pos)
+            for name, width in extra_dims:
+                g.create_dataset(f"obs/extra/{name}",
+                                 data=rng.rand(T + 1, width).astype(np.float32))
             for actor in actors:
                 g.create_dataset(f"env_states/actors/{actor}",
                                  data=rng.rand(T + 1, 13).astype(np.float32))
@@ -127,18 +134,23 @@ def test_dino_features_come_from_the_same_camera_as_the_images():
 def test_each_task_overrides_only_its_key_lists():
     """Every task shares the machinery; they differ in their actor set alone."""
     from datasets.liftpeg_dset import LiftPegDataset
+    from datasets.pickcube_dset import PickCubeDataset
     from datasets.placesphere_dset import PlaceSphereDataset
 
     cases = [
-        (PushBlockDataset, PUSHCUBE_ACTORS, "pc_state.h5", 31 + 13 * 3),   # panda cube goal table
-        (LiftPegDataset, LIFTPEG_ACTORS, "lp_state.h5", 31 + 13 * 2),      # panda peg table
-        (PlaceSphereDataset, PLACESPHERE_ACTORS, "ps_state.h5", 31 + 13 * 3),  # panda sphere bin table
+        # cls, actors, fixture, expected state_dim, expected proprio_dim, extra obs/extra fields
+        (PushBlockDataset, PUSHCUBE_ACTORS, "pc_state.h5", 31 + 13 * 3, 25, ()),   # panda cube goal table
+        (LiftPegDataset, LIFTPEG_ACTORS, "lp_state.h5", 31 + 13 * 2, 25, ()),      # panda peg table
+        (PlaceSphereDataset, PLACESPHERE_ACTORS, "ps_state.h5", 31 + 13 * 3, 25, ()),  # panda sphere bin table
+        # PickCube matches PushCube's width but names goal_site, and is the one 28-wide proprio
+        (PickCubeDataset, PICKCUBE_ACTORS, "pk_state.h5", 31 + 13 * 3, 28, PICKCUBE_EXTRA),
     ]
     loaded = {}
-    for cls, actors, name, expected_state in cases:
-        ds = cls(data_path=_write(os.path.join(FIXTURES, name), actors=actors))
+    for cls, actors, name, expected_state, expected_proprio, extra in cases:
+        ds = cls(data_path=_write(os.path.join(FIXTURES, name), actors=actors, extra_dims=extra))
         assert ds.state_dim == expected_state, (cls.__name__, ds.state_dim)
-        assert ds.proprio_dim == 9 + 9 + 7 and ds.action_dim == 4, cls.__name__
+        assert ds.proprio_dim == expected_proprio, (cls.__name__, ds.proprio_dim)
+        assert ds.action_dim == 4, cls.__name__
         # the machinery is genuinely shared, not re-implemented per task
         assert type(ds).get_frames is PushBlockDataset.get_frames, cls.__name__
         obs, act, state, _ = ds.get_frames(0, [0, 2])
@@ -146,10 +158,14 @@ def test_each_task_overrides_only_its_key_lists():
         assert state.shape == (2, ds.state_dim)
         loaded[cls] = ds
 
-    # PlaceSphere's state happens to be as wide as PushCube's; the keys still must not cross,
-    # or a mismatched recording would be mis-sliced instead of rejected
+    # PlaceSphere's and PickCube's states happen to be as wide as PushCube's; the keys still
+    # must not cross, or a mismatched recording would be mis-sliced instead of rejected.
+    # PickCube is the sharpest case: it shares PushCube's `cube` and differs only in naming the
+    # goal actor `goal_site` rather than `goal_region`.
     assert loaded[PlaceSphereDataset].state_dim == loaded[PushBlockDataset].state_dim
-    for cls, other_file in ((PushBlockDataset, "ps_state.h5"), (PlaceSphereDataset, "pc_state.h5")):
+    assert loaded[PickCubeDataset].state_dim == loaded[PushBlockDataset].state_dim
+    for cls, other_file in ((PushBlockDataset, "ps_state.h5"), (PlaceSphereDataset, "pc_state.h5"),
+                            (PushBlockDataset, "pk_state.h5"), (PickCubeDataset, "pc_state.h5")):
         try:
             cls(data_path=os.path.join(FIXTURES, other_file))
         except KeyError:
